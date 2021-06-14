@@ -59,7 +59,7 @@ Running a FullNode
 ------------------
 
 The master branch is actively developed and regularly committed to, and it can become unstable.  
-To compile a stable (production) release use any of the release tags form version 3.0.x.x and upwards.  
+To compile a stable (production) release use any of the release tags from version 3.0.x.x and upwards.  
 
 ```
 git clone https://github.com/stratisproject/StratisFullNode.git  
