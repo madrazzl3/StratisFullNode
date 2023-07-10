@@ -24,8 +24,6 @@ namespace Stratis.External.Masternodes
 {
     public sealed class RegistrationService
     {
-        /// <summary>The folder where the CirrusMinerD.exe is stored.</summary>
-        private string nodeExecutablesPath;
         private Network mainchainNetwork;
         private Network sidechainNetwork;
         private const string nodeExecutable = "Stratis.CirrusMinerD.exe";
@@ -38,7 +36,6 @@ namespace Stratis.External.Masternodes
         public async Task StartAsync(NetworkType networkType)
         {
             this.rootDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "StratisNode");
-            this.nodeExecutablesPath = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "StraxMinerD");
 
             if (networkType == NetworkType.Mainnet)
             {
@@ -58,9 +55,16 @@ namespace Stratis.External.Masternodes
                 this.sidechainNetwork = new CirrusRegTest();
             }
 
-            // Start main chain node
-            if (!await StartNodeAsync(networkType, NodeType.MainChain))
+            // Create the masternode public key.
+            if (!CreateFederationKey())
                 return;
+
+            if (!await CheckNodeIsRunning(NodeType.MainChain, this.mainchainNetwork.DefaultAPIPort))
+            {
+                // Start main chain node
+                if (!await StartNodeAsync(networkType, NodeType.MainChain))
+                    return;
+            }
 
             // Wait for main chain node to be initialized
             if (!await EnsureNodeIsInitializedAsync(NodeType.MainChain, this.mainchainNetwork.DefaultAPIPort))
@@ -74,13 +78,12 @@ namespace Stratis.External.Masternodes
             if (!await EnsureMainChainNodeAddressIndexerIsSyncedAsync())
                 return;
 
-            // Create the masternode public key.
-            if (!CreateFederationKey())
-                return;
-
-            // Start side chain node
-            if (!await StartNodeAsync(networkType, NodeType.SideChain))
-                return;
+            if (!await CheckNodeIsRunning(NodeType.SideChain, this.sidechainNetwork.DefaultAPIPort))
+            {
+                // Start side chain node
+                if (!await StartNodeAsync(networkType, NodeType.SideChain))
+                    return;
+            }
 
             // Wait for side chain node to be initialized
             if (!await EnsureNodeIsInitializedAsync(NodeType.SideChain, this.sidechainNetwork.DefaultAPIPort))
@@ -113,7 +116,18 @@ namespace Stratis.External.Masternodes
         private async Task<bool> StartNodeAsync(NetworkType networkType, NodeType nodeType)
         {
             var argumentBuilder = new StringBuilder();
+            var isWindows = IsRunningOnWindows();
 
+            if (isWindows)
+            {
+                argumentBuilder.Append("dotnet.exe ");
+            }
+            else 
+            {
+                argumentBuilder.Append("dotnet ");
+            }
+
+            argumentBuilder.Append("run ");
             argumentBuilder.Append($"-{nodeType.ToString().ToLowerInvariant()} ");
 
             if (nodeType == NodeType.MainChain)
@@ -131,11 +145,25 @@ namespace Stratis.External.Masternodes
             Console.WriteLine($"Starting the {nodeType} node on {networkType}.");
             Console.WriteLine($"Start up arguments: {argumentBuilder}");
 
+            string osSpecificCommand = "";
+            string osSpecificArguments = "";
+            if (isWindows)
+            {
+                osSpecificCommand = "CMD.EXE";
+                osSpecificArguments = $"/K \"{argumentBuilder}\"";
+            }
+            else
+            {
+                osSpecificCommand = "/bin/bash";
+                osSpecificArguments = $"-c \"{argumentBuilder}\"";
+            }
+
             var startInfo = new ProcessStartInfo
             {
-                Arguments = argumentBuilder.ToString(),
-                FileName = Path.Combine(this.nodeExecutablesPath, nodeExecutable),
+                Arguments = osSpecificArguments,
+                FileName = osSpecificCommand,
                 UseShellExecute = true,
+                WorkingDirectory = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..\\..\\..\\..\\", "Stratis.CirrusMinerD"))
             };
 
             var process = Process.Start(startInfo);
@@ -150,6 +178,18 @@ namespace Stratis.External.Masternodes
             Console.WriteLine($"{nodeType} node started.");
 
             return true;
+        }
+
+        private async Task<bool> CheckNodeIsRunning(NodeType nodeType, int apiPort)
+        {
+            try
+                {
+                    StatusModel blockModel = await $"http://localhost:{apiPort}/api".AppendPathSegment("node/status").GetJsonAsync<StatusModel>();
+                    return blockModel != null;
+                } catch
+                {
+                    return false;
+                }
         }
 
         private async Task<bool> EnsureNodeIsInitializedAsync(NodeType nodeType, int apiPort)
@@ -168,14 +208,21 @@ namespace Stratis.External.Masternodes
                     break;
                 }
 
-                StatusModel blockModel = await $"http://localhost:{apiPort}/api".AppendPathSegment("node/status").GetJsonAsync<StatusModel>();
-                if (blockModel.State == FullNodeState.Started.ToString())
+                try
                 {
-                    initialized = true;
-                    Console.WriteLine($"{nodeType} node initialized.");
-                    break;
+                    StatusModel blockModel = await $"http://localhost:{apiPort}/api".AppendPathSegment("node/status").GetJsonAsync<StatusModel>();
+                    if (blockModel.State == FullNodeState.Started.ToString())
+                    {
+                        initialized = true;
+                        Console.WriteLine($"{nodeType} node initialized.");
+                        break;
+                    }
+                } catch (Exception ex)
+                {
+                    Console.WriteLine(ex.ToString());
                 }
 
+                await Task.Delay(TimeSpan.FromSeconds(3));
             } while (true);
 
             return initialized;
@@ -387,9 +434,9 @@ namespace Stratis.External.Masternodes
 
         private bool CreateFederationKey()
         {
-            var keyFilePath = Path.Combine(this.rootDataDir, this.sidechainNetwork.RootFolderName, this.sidechainNetwork.Name, KeyTool.KeyFileDefaultName);
+            var keyFilePath = Path.Combine(this.rootDataDir, this.sidechainNetwork.RootFolderName, this.sidechainNetwork.Name);
 
-            if (File.Exists(keyFilePath))
+            if (File.Exists(Path.Combine(keyFilePath, KeyTool.KeyFileDefaultName)))
             {
                 Console.WriteLine($"Your masternode public key file already exists.");
                 return true;
@@ -413,6 +460,7 @@ namespace Stratis.External.Masternodes
             } while (true);
 
 
+            Directory.CreateDirectory(keyFilePath);
 
             // Generate keys for mining.
             var tool = new KeyTool(keyFilePath);
@@ -513,6 +561,14 @@ namespace Stratis.External.Masternodes
                 Console.WriteLine($"Press CRTL-C to exit...");
                 await Task.Delay(TimeSpan.FromSeconds(5));
             } while (true);
+        }
+
+        private bool IsRunningOnWindows()
+        {
+            OperatingSystem os = Environment.OSVersion;
+            PlatformID platform = os.Platform;
+
+            return platform == PlatformID.Win32NT || platform == PlatformID.Win32Windows;
         }
     }
 
